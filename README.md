@@ -36,7 +36,7 @@ npm run build
 npm start          # http://localhost:4000
 ```
 
-Tests (URL guard, LHR summarizer, PageSpeed client):
+Tests (URL guard, egress proxy, API token, run store, LHR summarizer, PageSpeed client):
 
 ```bash
 npm test -w server
@@ -58,8 +58,8 @@ The React build is served from Vercel's CDN. `api/index.js` exports the Express 
 1. **Get a PageSpeed Insights API key.** In Google Cloud Console, enable the *PageSpeed Insights API* and create an API key. Without a key, requests share Google's anonymous quota, which is usually exhausted, and audits fail with "Quota exceeded".
 2. **Deploy:** `npx vercel` (first time: links the project), then `npx vercel --prod`. You can also import the Git repository in the Vercel dashboard. No build settings are needed because `vercel.json` provides them.
 3. **Add storage:** in the Vercel project, go to **Storage → Create Database → Upstash for Redis** (free tier) and connect it to the project. This sets `KV_REST_API_URL` and `KV_REST_API_TOKEN`.
-4. **Set environment variables:** `PSI_API_KEY`, plus optionally `ALLOWED_HOSTS`.
-5. **Redeploy** so the new variables take effect: `npx vercel --prod`.
+4. **Set environment variables:** `PSI_API_KEY` and `WEBVITALS_TOKEN` (a long random value), plus optionally `ALLOWED_HOSTS`. Without `WEBVITALS_TOKEN`, a Vercel deployment answers audits, renames and deletes with 503, so strangers cannot spend your PageSpeed quota or delete your history.
+5. **Redeploy** so the new variables take effect: `npx vercel --prod`. The app asks for the token the first time you run an audit and remembers it in that browser.
 
 Without Redis the app still works, but history lives in the function's temporary storage and disappears; the UI shows a warning banner when that's the case.
 
@@ -68,6 +68,12 @@ Without Redis the app still works, but history lives in the function's temporary
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | `4000` | API port |
+| `HOST` | `127.0.0.1` and `::1` | Address to listen on. The server drives a real browser, so it is local by default; if you open it to the network, set `WEBVITALS_TOKEN` too |
+| `WEBVITALS_TOKEN` | *(unset)* | API token required to run audits and to rename or delete runs (`Authorization: Bearer` or `X-WebVitals-Token`). Reading history stays open. Required on Vercel |
+| `REQUIRE_TOKEN` | `true` on Vercel | Refuse audits and changes (503) while no `WEBVITALS_TOKEN` is set |
+| `MAX_RUNS` | `500` | Runs kept in history; the oldest are deleted beyond this |
+| `PSI_TIMEOUT_MS` | `100000` | Give up on a PageSpeed Insights audit after this long (below the 120 s function limit) |
+| `CHROME_NO_SANDBOX` | *(unset)* | `true` adds `--no-sandbox`, for containers that cannot run Chrome's sandbox (for example as root in Docker). Leave it off otherwise |
 | `ALLOWED_HOSTS` | *(unset)* | Comma-separated host allowlist, e.g. `example.com,staging.example.com`. Subdomains match. Recommended for shared deployments. |
 | `AUDIT_ENGINE` | `local`, or `psi` on Vercel | `local` runs Lighthouse in local Chrome; `psi` uses the PageSpeed Insights API |
 | `PSI_API_KEY` | *(unset)* | PageSpeed Insights API key. Required in practice for the `psi` engine. |
@@ -75,7 +81,7 @@ Without Redis the app still works, but history lives in the function's temporary
 | `CRUX_API_KEY` | *(unset)* | Local engine only: Google API key with the Chrome UX Report API enabled, used for field data and INP |
 | `CHROME_PATH` | auto | Path to the Chrome binary |
 | `DATA_DIR` | `server/data` | File storage only: where `runs.json` and saved HTML reports live |
-| `MAX_QUEUE` | `3` | Maximum audits queued at once. Audits run one at a time so timings don't interfere. |
+| `MAX_QUEUE` | `3` | Maximum audits in progress or queued at once. Local audits run one at a time so timings don't interfere; PageSpeed Insights audits run in parallel. |
 | `CORS_ORIGIN` | `http://localhost:5173` | Allowed browser origin for the API |
 
 ## Authorized testing only
@@ -86,8 +92,11 @@ Only audit sites you own or have permission to test. The server enforces some of
 - Only `http`/`https` URLs without embedded credentials are accepted.
 - Hostnames are resolved, and any address in a loopback, private, link-local (including cloud metadata `169.254.169.254`), CGNAT, multicast or reserved range is rejected.
 - `ALLOWED_HOSTS` restricts audits to an explicit list.
+- Addresses hidden inside IPv6 (NAT64 `64:ff9b::/96`, 6to4 `2002::/16`, IPv4-mapped) are checked as the IPv4 address they carry.
+- **Everything the local Chrome loads goes through a filtering proxy.** Redirects, images, scripts, `fetch` calls and WebSockets are all checked, not only the first URL. The proxy resolves each host itself and connects to the address it checked, so a DNS answer that changes after the check (DNS rebinding) cannot reach an internal address either. A page whose main document is redirected to an internal address fails to load; blocked subresources are listed in the run's warnings.
+- Chrome keeps its sandbox on (see `CHROME_NO_SANDBOX`).
 
-DNS is checked before Chrome loads the page, so a host that changes its DNS answer between the check and the load (DNS rebinding) could get past it. For an internet-facing deployment, also run the server in a network that has no route to internal services, and set `ALLOWED_HOSTS`.
+With the PageSpeed Insights engine (Vercel), Google's servers load the page, so it cannot reach your network at all. An internet-facing local-engine server should still run somewhere with no route to internal services.
 
 ## Project layout
 
@@ -103,6 +112,7 @@ server/
   src/summarize.js    Reduces the full Lighthouse result to the stored run record
   src/crux.js         Optional Chrome UX Report field data
   src/urlGuard.js     URL validation and private-network blocking
+  src/egressProxy.js  Filtering proxy for every connection the local Chrome makes
   src/store.js        Upstash Redis or JSON-file persistence
 client/
   src/App.jsx         Tabs: Analyze / History / Compare
@@ -114,10 +124,10 @@ client/
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/runs` | `{ url, formFactor: "mobile" \| "desktop", label?, authorized: true }` runs an audit and returns the run |
-| `GET` | `/api/runs` | All runs, newest first (`?url=` to filter) |
-| `GET` | `/api/runs/:id` | One run |
-| `PATCH` | `/api/runs/:id` | `{ label }` |
-| `DELETE` | `/api/runs/:id` | Delete a run and its report |
+| `POST` | `/api/runs` | `{ url, formFactor: "mobile" \| "desktop", label?, authorized: true }` runs an audit and returns the run. Token required when set |
+| `GET` | `/api/runs` | Run summaries (scores, metric values, totals; no findings or request lists), newest first. `?url=` filters, `?limit=` (default 200, max 1000); the `X-Total-Count` header has the total |
+| `GET` | `/api/runs/:id` | One full run |
+| `PATCH` | `/api/runs/:id` | `{ label }`. Token required when set |
+| `DELETE` | `/api/runs/:id` | Delete a run and its report. Token required when set |
 | `GET` | `/api/runs/:id/report` | Full Lighthouse HTML report |
 | `GET` | `/api/health` | Queue depth, audit engine, storage type, and whether field data is enabled |

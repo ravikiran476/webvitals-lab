@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { api } from '../api.js';
+import { AuthError, api } from '../api.js';
 
-export default function AnalyzePanel({ onCompleted, fieldDataEnabled }) {
+export default function AnalyzePanel({ onCompleted, onAuthError, fieldDataEnabled }) {
   const [url, setUrl] = useState('');
   const [formFactor, setFormFactor] = useState('mobile');
   const [label, setLabel] = useState('');
@@ -28,6 +28,7 @@ export default function AnalyzePanel({ onCompleted, fieldDataEnabled }) {
       setLabel('');
     } catch (err) {
       setError(err.message);
+      if (err instanceof AuthError) onAuthError?.();
     } finally {
       setRunning(false);
     }

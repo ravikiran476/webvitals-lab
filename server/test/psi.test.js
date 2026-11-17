@@ -67,6 +67,19 @@ test('surfaces quota errors as 429 with a key hint', async () => {
   await assert.rejects(runPageSpeed('https://example.com/'), (err) => err.status === 429 && /PSI_API_KEY/.test(err.message));
 });
 
+test('times out before the serverless function limit, with a 504', async () => {
+  process.env.PSI_TIMEOUT_MS = '20';
+  globalThis.fetch = (url, { signal }) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason)));
+  // AbortSignal.timeout does not keep the process alive on its own.
+  const keepAlive = setTimeout(() => {}, 5000);
+  try {
+    await assert.rejects(runPageSpeed('https://example.com/'), (err) => err.status === 504 && /within 0 s/.test(err.message));
+  } finally {
+    clearTimeout(keepAlive);
+    delete process.env.PSI_TIMEOUT_MS;
+  }
+});
+
 test('surfaces page load failures', async () => {
   mockFetch(200, { lighthouseResult: { runtimeError: { message: 'DNS failure' } } });
   await assert.rejects(runPageSpeed('https://example.com/'), /DNS failure/);

@@ -1,6 +1,23 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Bar, BarChart, CartesianGrid, LabelList, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { api } from '../api.js';
 import { CATEGORY_LABELS, LAB_ORDER, METRICS, formatBytes, formatMetric, rate, runName } from '../metrics.js';
+
+const ENGINE_LABEL = { local: 'local Lighthouse', psi: 'PageSpeed Insights' };
+
+/** The list holds summaries; the audit diff needs the full run (with findings). */
+function useFullRun(id) {
+  const [run, setRun] = useState(null);
+  useEffect(() => {
+    let current = true;
+    setRun(null);
+    if (id) api.getRun(id).then((r) => current && setRun(r), () => current && setRun(null));
+    return () => {
+      current = false;
+    };
+  }, [id]);
+  return run;
+}
 import Rating, { Delta } from './Rating.jsx';
 import ChartTooltip from './ChartTooltip.jsx';
 
@@ -18,8 +35,8 @@ export default function Compare({ runs }) {
     setBaseId(prev?.id || latest.id);
   }, [runs, baseId, candId]);
 
-  const base = runs.find((r) => r.id === baseId);
-  const cand = runs.find((r) => r.id === candId);
+  const base = useFullRun(runs.some((r) => r.id === baseId) ? baseId : '');
+  const cand = useFullRun(runs.some((r) => r.id === candId) ? candId : '');
 
   const scoreData = useMemo(() => (base && cand ? Object.entries(CATEGORY_LABELS).map(([k, label]) => ({
     label, before: base.scores[k], after: cand.scores[k],
@@ -60,6 +77,17 @@ export default function Compare({ runs }) {
         {base && cand && (base.url !== cand.url || base.formFactor !== cand.formFactor) && (
           <div className="banner warn">These runs are for different pages or devices, so differences may not reflect your optimization.</div>
         )}
+        {base && cand && base.engine && cand.engine && base.engine !== cand.engine && (
+          <div className="banner warn">
+            These runs were measured differently ({ENGINE_LABEL[base.engine] ?? base.engine} vs {ENGINE_LABEL[cand.engine] ?? cand.engine}): different machines and network conditions, so timings are not comparable.
+          </div>
+        )}
+        {base && cand && base.lighthouseVersion !== cand.lighthouseVersion && (
+          <div className="banner warn">
+            These runs used different Lighthouse versions ({base.lighthouseVersion} vs {cand.lighthouseVersion}). Scoring and audits can change between versions.
+          </div>
+        )}
+        {(baseId || candId) && (!base || !cand) && <p className="muted small">Loading runs…</p>}
       </section>
 
       {base && cand && (

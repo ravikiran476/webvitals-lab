@@ -22,17 +22,65 @@ for (const [addr, prefix] of [
 for (const [addr, prefix] of [
   ['::', 128],
   ['::1', 128],
+  ['100::', 64], // discard-only
   ['fc00::', 7],
   ['fe80::', 10],
+  ['fec0::', 10], // deprecated site-local
   ['ff00::', 8],
 ]) {
   blocked.addSubnet(addr, prefix, 'ipv6');
 }
 
-function isBlockedAddress(address) {
-  const mapped = address.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
-  if (mapped) return blocked.check(mapped[1], 'ipv4');
+/** The 8 groups of an IPv6 address as numbers, expanding "::" and a trailing dotted IPv4. */
+function ipv6Groups(address) {
+  let text = address.toLowerCase().split('%')[0];
+  const dotted = /(\d+\.\d+\.\d+\.\d+)$/.exec(text);
+  if (dotted) {
+    const [a, b, c, d] = dotted[1].split('.').map(Number);
+    text = text.slice(0, -dotted[1].length) + `${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const [head, tail] = text.split('::');
+  const left = head ? head.split(':') : [];
+  const right = tail !== undefined && tail ? tail.split(':') : [];
+  const fill = tail !== undefined ? Array(8 - left.length - right.length).fill('0') : [];
+  return [...left, ...fill, ...right].map((g) => parseInt(g, 16));
+}
+
+const v4 = (hi, lo) => `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+
+/**
+ * IPv4 addresses carried inside IPv6 ones. A host that resolves to 64:ff9b::7f00:1 (NAT64)
+ * or 2002:7f00:1:: (6to4) reaches 127.0.0.1, so the embedded address is checked as well.
+ */
+export function embeddedIPv4(address) {
+  if (!net.isIPv6(address)) return undefined;
+  const g = ipv6Groups(address);
+  if (g.length !== 8 || g.some(Number.isNaN)) return undefined;
+  const zeros = (from, to) => g.slice(from, to).every((x) => x === 0);
+  if (zeros(0, 5) && (g[5] === 0xffff || g[5] === 0)) return g[6] || g[7] ? v4(g[6], g[7]) : undefined; // ::ffff:a.b.c.d, ::a.b.c.d
+  if (g[0] === 0x64 && g[1] === 0xff9b && zeros(2, 6)) return v4(g[6], g[7]); // 64:ff9b::/96 NAT64
+  if (g[0] === 0x64 && g[1] === 0xff9b && g[2] === 1) return v4(g[6], g[7]); // 64:ff9b:1::/48 local-use NAT64
+  if (g[0] === 0x2002) return v4(g[1], g[2]); // 2002::/16 6to4
+  return undefined;
+}
+
+export function isBlockedAddress(address) {
+  const inner = embeddedIPv4(address);
+  if (inner && blocked.check(inner, 'ipv4')) return true;
   return blocked.check(address, net.isIPv6(address) ? 'ipv6' : 'ipv4');
+}
+
+/**
+ * Resolves a hostname and returns one public address to connect to, or throws. Connecting to
+ * the address that was checked (not resolving again) is what defeats DNS rebinding.
+ */
+export async function resolvePublicAddress(host, lookup = dns.lookup) {
+  const name = host.replace(/^\[|\]$/g, '');
+  const addresses = net.isIP(name) ? [{ address: name, family: net.isIPv6(name) ? 6 : 4 }] : await lookup(name, { all: true });
+  if (!addresses.length) throw new Error(`Could not resolve host "${name}"`);
+  const bad = addresses.find((a) => isBlockedAddress(a.address));
+  if (bad) throw new Error(`"${name}" resolves to a private or reserved address (${bad.address})`);
+  return addresses[0];
 }
 
 function allowedHosts() {

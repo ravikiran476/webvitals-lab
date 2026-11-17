@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
-import { api } from './api.js';
+import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
+import { AuthError, api, hasToken, setToken } from './api.js';
 import AnalyzePanel from './components/AnalyzePanel.jsx';
-import RunReport from './components/RunReport.jsx';
-import History from './components/History.jsx';
-import Compare from './components/Compare.jsx';
+
+// The chart views (and the charting library) load only when they are first shown.
+const RunReport = lazy(() => import('./components/RunReport.jsx'));
+const History = lazy(() => import('./components/History.jsx'));
+const Compare = lazy(() => import('./components/Compare.jsx'));
 
 const TABS = [
   ['analyze', 'Analyze'],
@@ -17,6 +19,7 @@ export default function App() {
   const [selected, setSelected] = useState(null);
   const [health, setHealth] = useState(null);
   const [error, setError] = useState('');
+  const [needToken, setNeedToken] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -28,28 +31,45 @@ export default function App() {
 
   useEffect(() => {
     refresh();
-    api.health().then(setHealth).catch(() => setError('API is not reachable. Is the server running on port 4000?'));
+    api.health()
+      .then((h) => {
+        setHealth(h);
+        if (h.auth && !hasToken()) setNeedToken(true);
+      })
+      .catch(() => setError('API is not reachable. Is the server running on port 4000?'));
   }, [refresh]);
 
-  const openRun = async (id) => {
+  /** Runs an action that may need the API token, asking for it when the server says so. */
+  const guarded = (action) => async (...args) => {
     try {
-      setSelected(await api.getRun(id));
-      setTab('analyze');
+      return await action(...args);
     } catch (err) {
-      setError(err.message);
+      if (err instanceof AuthError) setNeedToken(true);
+      else setError(err.message);
+      return undefined;
     }
   };
+
+  const openRun = guarded(async (id) => {
+    setSelected(await api.getRun(id));
+    setTab('analyze');
+  });
 
   const onCompleted = (run) => {
     setSelected(run);
     refresh();
   };
 
-  const onDelete = async (id) => {
+  const onDelete = guarded(async (id) => {
     await api.deleteRun(id);
     if (selected?.id === id) setSelected(null);
     refresh();
-  };
+  });
+
+  const onRename = guarded(async (id, label) => {
+    await api.renameRun(id, label);
+    refresh();
+  });
 
   return (
     <div className="app">
@@ -77,6 +97,8 @@ export default function App() {
         </nav>
       </header>
 
+      {needToken && <TokenBanner onSaved={() => setNeedToken(false)} />}
+
       {health?.storage && !health.storage.persistent && (
         <div className="banner warn" role="status">
           Run history is not being saved permanently on this deployment. Connect Upstash Redis in the Vercel project to keep it.
@@ -91,16 +113,38 @@ export default function App() {
       )}
 
       <main>
-        {tab === 'analyze' && (
-          <>
-            <AnalyzePanel onCompleted={onCompleted} fieldDataEnabled={health?.fieldData} />
-            {selected && <RunReport run={selected} previous={previousRun(runs, selected)} />}
-          </>
-        )}
-        {tab === 'history' && <History runs={runs} onOpen={openRun} onDelete={onDelete} onRename={async (id, label) => { await api.renameRun(id, label); refresh(); }} />}
-        {tab === 'compare' && <Compare runs={runs} />}
+        <Suspense fallback={<section className="card empty">Loading…</section>}>
+          {tab === 'analyze' && (
+            <>
+              <AnalyzePanel onCompleted={onCompleted} onAuthError={() => setNeedToken(true)} fieldDataEnabled={health?.fieldData} />
+              {selected && <RunReport run={selected} previous={previousRun(runs, selected)} />}
+            </>
+          )}
+          {tab === 'history' && <History runs={runs} onOpen={openRun} onDelete={onDelete} onRename={onRename} />}
+          {tab === 'compare' && <Compare runs={runs} />}
+        </Suspense>
       </main>
     </div>
+  );
+}
+
+function TokenBanner({ onSaved }) {
+  const [value, setValue] = useState('');
+  return (
+    <form
+      className="banner warn token"
+      onSubmit={(e) => {
+        e.preventDefault();
+        setToken(value.trim());
+        onSaved();
+      }}
+    >
+      <label>
+        This server needs its API token (<code>WEBVITALS_TOKEN</code>) to run audits or change runs.{' '}
+        <input type="password" autoComplete="off" value={value} onChange={(e) => setValue(e.target.value)} placeholder="API token" aria-label="API token" />
+      </label>
+      <button className="primary" type="submit" disabled={!value.trim()}>Save token</button>
+    </form>
   );
 }
 

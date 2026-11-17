@@ -16,7 +16,18 @@ export async function runPageSpeed(url, { formFactor = 'mobile' } = {}) {
   for (const c of CATEGORIES) params.append('category', c);
   if (process.env.PSI_API_KEY) params.set('key', process.env.PSI_API_KEY);
 
-  const res = await fetch(`${ENDPOINT}?${params}`, { signal: AbortSignal.timeout(110_000) });
+  // Below the function's 120 s maxDuration, so a slow audit ends with a clear error rather
+  // than the platform killing the request.
+  const timeoutMs = Number(process.env.PSI_TIMEOUT_MS) || 100_000;
+  let res;
+  try {
+    res = await fetch(`${ENDPOINT}?${params}`, { signal: AbortSignal.timeout(timeoutMs) });
+  } catch (err) {
+    if (err?.name !== 'TimeoutError') throw err;
+    const timeout = new Error(`PageSpeed Insights did not finish within ${Math.round(timeoutMs / 1000)} s. Slow pages sometimes take longer; try again.`);
+    timeout.status = 504;
+    throw timeout;
+  }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
     const message = body.error?.message || `PageSpeed Insights responded ${res.status}`;

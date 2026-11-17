@@ -11,17 +11,36 @@ import { summarize } from './summarize.js';
 import * as store from './store.js';
 
 const MAX_QUEUE = Number(process.env.MAX_QUEUE) || 3;
+const API_TOKEN = process.env.WEBVITALS_TOKEN || '';
+// A public deployment must not let anyone spend its PageSpeed quota or delete its history.
+const REQUIRE_TOKEN = Boolean(process.env.VERCEL) || process.env.REQUIRE_TOKEN === 'true';
 
 export const app = express();
+app.disable('x-powered-by');
 app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:5173' }));
 app.use(express.json({ limit: '16kb' }));
 
-// Local Lighthouse is CPU-heavy and parallel runs skew each other's timings, so audits run one at a time.
+const digest = (value) => crypto.createHash('sha256').update(String(value)).digest();
+
+/** Running audits and changing or deleting runs needs WEBVITALS_TOKEN when one is set (always on Vercel). */
+function requireToken(req, _res, next) {
+  if (!API_TOKEN) {
+    if (REQUIRE_TOKEN) return next(new HttpError(503, 'Audits and changes are disabled until WEBVITALS_TOKEN is set on the server'));
+    return next();
+  }
+  const given = req.get('x-webvitals-token') || (req.get('authorization') || '').replace(/^Bearer\s+/i, '');
+  if (given && crypto.timingSafeEqual(digest(given), digest(API_TOKEN))) return next();
+  return next(Object.assign(new HttpError(401, 'API token required'), { auth: true }));
+}
+
+// Local Lighthouse is CPU-heavy and parallel runs skew each other's timings, so local audits
+// run one at a time. PageSpeed Insights runs on Google's servers, so those only share a limit.
 let queue = Promise.resolve();
 let pending = 0;
-function enqueue(task) {
+function enqueue(task, { serial }) {
   if (pending >= MAX_QUEUE) throw new HttpError(429, 'Too many audits queued, try again shortly');
   pending++;
+  if (!serial) return task().finally(() => pending--);
   const result = queue.then(task).finally(() => pending--);
   queue = result.catch(() => {});
   return result;
@@ -35,9 +54,10 @@ app.get('/api/health', (_req, res) => res.json({
   engine: auditEngine(),
   fieldData: fieldDataEnabled(),
   storage: store.storageInfo(),
+  auth: Boolean(API_TOKEN) || REQUIRE_TOKEN,
 }));
 
-app.post('/api/runs', asyncRoute(async (req, res) => {
+app.post('/api/runs', requireToken, asyncRoute(async (req, res) => {
   const { url, formFactor = 'mobile', label = '', authorized } = req.body || {};
   if (authorized !== true) {
     throw new HttpError(400, 'Confirm you are authorized to test this URL');
@@ -46,6 +66,7 @@ app.post('/api/runs', asyncRoute(async (req, res) => {
     throw new HttpError(400, 'formFactor must be "mobile" or "desktop"');
   }
   const target = await validateTarget(url);
+  const engine = auditEngine();
 
   const run = await enqueue(async () => {
     const started = Date.now();
@@ -57,17 +78,21 @@ app.post('/api/runs', asyncRoute(async (req, res) => {
       label: String(label).slice(0, 80),
       createdAt: new Date().toISOString(),
       durationMs: Date.now() - started,
-      engine: auditEngine(),
+      engine,
       field,
       ...summarize(lhr),
     }, html);
-  });
+  }, { serial: engine === 'local' });
 
   res.status(201).json(run);
 }));
 
+// Summaries (no findings or request lists), newest first. Full runs come from /api/runs/:id.
 app.get('/api/runs', asyncRoute(async (req, res) => {
-  res.json(await store.listRuns({ url: req.query.url }));
+  const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000);
+  const { runs, total } = await store.listRuns({ url: req.query.url, limit });
+  res.set('X-Total-Count', String(total));
+  res.json(runs);
 }));
 
 app.get('/api/runs/:id', asyncRoute(async (req, res) => {
@@ -76,13 +101,13 @@ app.get('/api/runs/:id', asyncRoute(async (req, res) => {
   res.json(run);
 }));
 
-app.patch('/api/runs/:id', asyncRoute(async (req, res) => {
+app.patch('/api/runs/:id', requireToken, asyncRoute(async (req, res) => {
   const run = await store.updateRun(req.params.id, { label: String(req.body?.label ?? '').slice(0, 80) });
   if (!run) throw new HttpError(404, 'Run not found');
   res.json(run);
 }));
 
-app.delete('/api/runs/:id', asyncRoute(async (req, res) => {
+app.delete('/api/runs/:id', requireToken, asyncRoute(async (req, res) => {
   if (!(await store.deleteRun(req.params.id))) throw new HttpError(404, 'Run not found');
   res.status(204).end();
 }));
@@ -105,5 +130,5 @@ if (!process.env.VERCEL && fs.existsSync(clientDist)) {
 app.use((err, _req, res, _next) => {
   const status = err.status || 500;
   if (status >= 500) console.error(err);
-  res.status(status).json({ error: err.message || 'Internal error' });
+  res.status(status).json({ error: err.message || 'Internal error', ...(err.auth ? { auth: true } : {}) });
 });
