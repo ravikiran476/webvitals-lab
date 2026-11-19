@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.0
+
+### Dependencies
+
+- **Lighthouse 13.6** (was 12.8). This clears all 30 advisories left in 0.2.0; `npm audit` now reports none.
+- **Node.js 22.19 or newer is required**, because Lighthouse 13 requires it.
+
+### Changes
+
+- Reports read Lighthouse 13's "insight" audits, which replace most of the older performance audits: image delivery, cache lifetimes, font display, legacy JavaScript, LCP request discovery, network dependency tree and others. They appear under "What needs attention" with their estimated time and byte savings and the resources involved.
+- The LCP element is read from the LCP breakdown insight. Runs saved with Lighthouse 12 still display as before.
+- This also applies to PageSpeed Insights runs, which already return Lighthouse 13 results: their LCP element, byte savings and resource lists were missing before.
+
+### Upgrading
+
+- Use Node.js 22.19 or newer. Vercel's Node 22.x runtime already meets this.
+- Compare already warns when two runs used different Lighthouse versions. Scores and findings from Lighthouse 12 and 13 runs are not directly comparable.
+
 ## 0.2.0
 
 ### Security

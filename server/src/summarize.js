@@ -42,26 +42,50 @@ function categorize(id) {
   return 'other';
 }
 
+/** Table rows of an audit. Lighthouse 13 insights often wrap their tables in a "list". */
+function rowsOf(details) {
+  if (!Array.isArray(details?.items)) return [];
+  if (details.type !== 'list') return details.items;
+  return details.items.flatMap((part) => {
+    if (part?.type === 'table') return part.items || [];
+    if (part?.type === 'list-section' && part.value?.type === 'table') return part.value.items || [];
+    return [];
+  });
+}
+
 function itemsOf(audit, limit = 8) {
-  const items = audit?.details?.items;
-  if (!Array.isArray(items)) return [];
-  return items.slice(0, limit).map((i) => ({
-    url: typeof i.url === 'string' ? i.url : i.entity?.text || i.source?.url || i.node?.snippet || null,
-    totalBytes: i.totalBytes ?? i.transferSize ?? null,
-    wastedBytes: i.wastedBytes ?? null,
-    wastedMs: i.wastedMs ?? i.blockingTime ?? i.scripting ?? i.duration ?? null,
-  }));
+  return rowsOf(audit?.details)
+    .map((i) => ({
+      url: typeof i.url === 'string' ? i.url : i.entity?.text || i.source?.url || i.node?.snippet || i.origin || null,
+      totalBytes: i.totalBytes ?? i.transferSize ?? null,
+      wastedBytes: i.wastedBytes ?? null,
+      wastedMs: i.wastedMs ?? i.blockingTime ?? i.scripting ?? i.duration ?? null,
+    }))
+    .filter((i) => i.url || i.totalBytes != null || i.wastedBytes != null || i.wastedMs != null)
+    .slice(0, limit);
 }
 
 function lcpElement(lhr) {
   try {
-    const details = lhr.audits['largest-contentful-paint-element']?.details;
-    const table = details?.type === 'list' ? details.items[0] : details;
-    const node = table?.items?.[0]?.node;
+    // Lighthouse 12 has a dedicated audit; Lighthouse 13 puts the element in the LCP breakdown insight.
+    const legacy = lhr.audits['largest-contentful-paint-element']?.details;
+    if (legacy) {
+      const table = legacy.type === 'list' ? legacy.items[0] : legacy;
+      const node = table?.items?.[0]?.node;
+      return node ? { snippet: node.snippet, selector: node.selector } : null;
+    }
+    const node = lhr.audits['lcp-breakdown-insight']?.details?.items?.find((i) => i?.type === 'node');
     return node ? { snippet: node.snippet, selector: node.selector } : null;
   } catch {
     return null;
   }
+}
+
+/** Estimated time saved, in ms. Insights report it per metric, some only for FCP. */
+function savingsMsOf(a) {
+  if (a.details?.overallSavingsMs != null) return a.details.overallSavingsMs;
+  const values = [a.metricSavings?.LCP, a.metricSavings?.FCP].filter((v) => typeof v === 'number');
+  return values.length ? Math.max(...values) : null;
 }
 
 export function summarize(lhr) {
@@ -81,7 +105,8 @@ export function summarize(lhr) {
   }
 
   // Only audits Lighthouse itself displays. Lighthouse 12 also ships "insight" audits in a
-  // hidden group that duplicate the visible diagnostics.
+  // hidden group that duplicate the visible diagnostics; Lighthouse 13 shows the insights and
+  // drops most of the older audits.
   const perfIds = new Set((lhr.categories.performance?.auditRefs || [])
     .filter((r) => r.group !== 'hidden')
     .map((r) => r.id));
@@ -98,8 +123,8 @@ export function summarize(lhr) {
       score: a.score,
       kind: isOpportunity ? 'opportunity' : 'diagnostic',
       category: categorize(a.id),
-      savingsMs: a.details?.overallSavingsMs ?? a.metricSavings?.LCP ?? null,
-      savingsBytes: a.details?.overallSavingsBytes ?? null,
+      savingsMs: savingsMsOf(a),
+      savingsBytes: a.details?.overallSavingsBytes ?? a.details?.debugData?.wastedBytes ?? null,
       items: itemsOf(a),
     });
   }

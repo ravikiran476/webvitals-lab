@@ -2,7 +2,7 @@
 
 A website performance analyzer. It runs Lighthouse audits against public URLs you are authorized to test, reports Core Web Vitals and other metrics, tracks results across runs, points to the images, scripts and resources that need work, and compares before/after runs.
 
-**Stack:** React 18 + Vite + Recharts (client) · Node.js + Express + Lighthouse 12 (server) · Vercel + Upstash Redis (deployment)
+**Stack:** React 18 + Vite + Recharts (client) · Node.js + Express + Lighthouse 13 (server) · Vercel + Upstash Redis (deployment)
 
 ## Features
 
@@ -16,7 +16,7 @@ A website performance analyzer. It runs Lighthouse audits against public URLs yo
 
 ## Requirements
 
-- Node.js 20+ (22 recommended)
+- Node.js 22.19 or newer (Lighthouse 13 requires it)
 - Google Chrome or Chromium installed. Set `CHROME_PATH` if it isn't found automatically.
 
 ## Getting started

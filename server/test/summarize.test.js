@@ -62,3 +62,54 @@ test('summarizes resources without the total row, heaviest first', () => {
   assert.equal(s.resourceSummary.length, 1);
   assert.deepEqual(s.heaviestRequests.map((r) => r.url), ['b.png', 'a.js']);
 });
+
+// Shapes taken from a real Lighthouse 13.6 run.
+const lhr13 = {
+  lighthouseVersion: '13.6.0',
+  finalDisplayedUrl: 'https://example.com/',
+  categories: {
+    performance: {
+      score: 0.4,
+      auditRefs: [
+        { id: 'largest-contentful-paint', group: 'metrics' },
+        { id: 'cache-insight', group: 'insights' },
+        { id: 'font-display-insight', group: 'insights' },
+        { id: 'lcp-discovery-insight', group: 'insights' },
+        { id: 'lcp-breakdown-insight', group: 'insights' },
+      ],
+    },
+  },
+  audits: {
+    'largest-contentful-paint': { id: 'largest-contentful-paint', numericValue: 9100, score: 0.01 },
+    'cache-insight': {
+      id: 'cache-insight', title: 'Use efficient cache lifetimes', score: 0, scoreDisplayMode: 'metricSavings', metricSavings: { FCP: 0, LCP: 900 },
+      details: { type: 'table', items: [{ url: 'https://cdn.example/a.js', cacheLifetimeMs: 900000, totalBytes: 180430, wastedBytes: 161259 }], debugData: { type: 'debugdata', wastedBytes: 161259 } },
+    },
+    'font-display-insight': {
+      id: 'font-display-insight', title: 'Font display', score: 0, scoreDisplayMode: 'metricSavings', metricSavings: { FCP: 50, INP: 0 },
+      details: { type: 'table', items: [{ url: 'https://example.com/f.woff2', wastedMs: 60 }] },
+    },
+    'lcp-discovery-insight': {
+      id: 'lcp-discovery-insight', title: 'LCP request discovery', score: 0, scoreDisplayMode: 'numeric', metricSavings: { LCP: 0 },
+      details: { type: 'list', items: [{ type: 'checklist', items: { priorityHinted: { label: 'fetchpriority=high should be applied', value: false } } }, { type: 'node', snippet: '<img>' }] },
+    },
+    'lcp-breakdown-insight': {
+      id: 'lcp-breakdown-insight', title: 'LCP breakdown', score: 1, scoreDisplayMode: 'informative',
+      details: { type: 'list', items: [{ type: 'table', items: [{ subpart: 'timeToFirstByte', duration: 190 }] }, { type: 'node', snippet: '<img src="hero.jpg">', selector: 'main > img' }] },
+    },
+  },
+};
+
+test('reads Lighthouse 13 insight audits', () => {
+  const s = summarize(lhr13);
+  assert.deepEqual(s.findings.map((f) => f.id), ['cache-insight', 'font-display-insight', 'lcp-discovery-insight']);
+  const [cache, font, discovery] = s.findings;
+  assert.equal(cache.category, 'resources');
+  assert.equal(cache.savingsMs, 900);
+  assert.equal(cache.savingsBytes, 161259);
+  assert.equal(cache.items[0].url, 'https://cdn.example/a.js');
+  assert.equal(font.savingsMs, 50, 'FCP-only savings still count');
+  assert.equal(discovery.category, 'images');
+  assert.deepEqual(discovery.items, [], 'checklists and nodes are not resource rows');
+  assert.deepEqual(s.lcpElement, { snippet: '<img src="hero.jpg">', selector: 'main > img' });
+});
